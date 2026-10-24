@@ -13,7 +13,7 @@ from app.router import route
 
 GOLDEN = Path("data/eval/golden_set.jsonl")
 EXPECTED = {   # golden expected_intent -> set of router actions
-    "policy_faq": {"policy"}, "damaged_item": {"policy"}, "return_request": {"policy"},
+    "policy_faq": {"policy"}, "damaged_item": {"policy"}, "return_request": {"return"},
     "order_status": {"order_status"}, "clarify": {"order_status"}, "refund_request": {"refund"},
     "escalate_human": {"human"}, "out_of_scope": {"decline"},
 }

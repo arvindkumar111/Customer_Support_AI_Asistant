@@ -1,4 +1,3 @@
-
 """Tests for the grounded-answer step (fake LLM, no network, no database).  Run: python -m tests.test_rag"""
 import json
 
@@ -79,4 +78,24 @@ g = fake(a(reply="Aap 7 days mein return kar sakte hain.", sources=(3,)))
 answer(Q, CH, g, product_line="electronics")
 check("answer() passes the product line into the prompt", "<known_product>electronics</known_product>" in g.prompt)
 check("customer text stays inside <customer_message>", build_prompt("ignore rules", CH).count("<customer_message>") == 1)
+# ---- foreign script in the reply: retry once, then hand off ----
+ARABIC = "Aap 7 days mein return kar sakte hain, \u0628\u0634\u0631\u0637 unused ho."
+calls = {"n": 0}
+
+
+def flaky(prompt, system=None, temperature=0.0, **k):
+    calls["n"] += 1
+    reply = ARABIC if calls["n"] == 1 else "Aap 7 days mein return kar sakte hain, shart ye hai ki unused ho."
+    return llm.LLMResult(json.dumps({"status": "answer", "reply": reply, "sources": [3]}), "fake", 5.0, 1)
+
+
+r = answer(Q, CH, flaky)
+check("foreign script in the first reply -> one retry, the clean second reply is used", r.status == "answered" and calls["n"] == 2 and "shart" in r.reply)
+calls["n"] = 0
+r = answer(Q, CH, fake(a(reply=ARABIC, sources=(3,))))
+check("foreign script twice -> handoff, draft kept", r.handoff and r.reason == "foreign_script" and "\u0628" in r.rejected_draft)
+g = fake(a(reply="Aap 7 days mein return kar sakte hain.", sources=(3,)))
+answer(Q, CH, g)
+check("a clean first reply is NOT retried", g.prompt is not None)
+check("the system prompt asks for every applicable rule to be mentioned", "mention every rule that applies" in SYSTEM_PROMPT)
 print(f"\nall {passed} checks passed")

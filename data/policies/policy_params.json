@@ -1,0 +1,4 @@
+{
+  "returns_electronics.md": {"return_window_days": 7},
+  "returns_fashion.md": {"return_window_days": 15}
+}

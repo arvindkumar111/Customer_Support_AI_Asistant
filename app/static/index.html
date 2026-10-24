@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Customer support</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="top">
+      <div>
+        <h1>Customer support</h1>
+        <p class="sub">Ask in English, Hindi or Hinglish</p>
+      </div>
+      <div id="who" class="who" hidden>
+        <span id="who-text"></span>
+        <button id="logout" type="button" class="link">Log out</button>
+      </div>
+    </header>
+
+    <section id="login" class="card" hidden aria-labelledby="login-title">
+      <h2 id="login-title">Log in to ask about your orders</h2>
+      <p class="note">Demo login: pick a test customer. In a real site, your account login provides this.</p>
+      <div id="login-form" class="row">
+        <label for="customer" class="sr">Test customer</label>
+        <select id="customer"></select>
+        <button id="login-btn" type="button" class="primary">Log in</button>
+      </div>
+      <button id="guest-btn" type="button" class="link">Continue without logging in</button>
+      <p class="note">Without logging in you can ask about policies (returns, refunds, warranty, shipping) but not about your orders.</p>
+      <p id="login-error" class="error" role="alert" hidden></p>
+    </section>
+
+    <section id="chat" class="chat" hidden aria-label="Conversation">
+      <ol id="log" class="log" aria-live="polite"></ol>
+      <div id="chips" class="chips">
+        <button type="button" class="chip">Where is my order?</button>
+        <button type="button" class="chip">What is the return policy?</button>
+        <button type="button" class="chip">Refund kab milega?</button>
+        <button type="button" class="chip">I want to talk to a human</button>
+      </div>
+      <form id="form" class="composer" autocomplete="off">
+        <label for="msg" class="sr">Your message</label>
+        <textarea id="msg" rows="1" maxlength="1000" placeholder="Type your question..."></textarea>
+        <button id="send" type="submit" class="primary">Send</button>
+      </form>
+      <p id="count" class="count" hidden></p>
+    </section>
+  </main>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

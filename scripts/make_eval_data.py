@@ -18,7 +18,7 @@ G = [
  ("Laptop warranty mein liquid damage cover hota hai?", "hinglish", None, "policy_faq", "warranty_phones_laptops.md", ["not covered"], "answer_from_docs", False, True, ""),
  ("retrun policy electronics", "en", None, "policy_faq", "returns_electronics.md", ["7 days"], "answer_from_docs", False, True, "typo"),
  ("wrnty kitni hai phone ki", "hinglish", None, "policy_faq", "warranty_phones_laptops.md", ["1 year"], "answer_from_docs", False, True, "spelling variation"),
- ("Do you deliver on Sundays?", "en", None, "policy_faq", "shipping_delivery.md", [], "say_not_sure_and_offer_human", False, False, "docs do not guarantee it; must not invent"),
+ ("Do you deliver on Sundays?", "en", None, "policy_faq", "shipping_delivery.md", ["not guaranteed"], "answer_from_docs", False, True, "policy says Sunday delivery is not guaranteed; a faithful answer says exactly that (label corrected after eval)"),
  ("Do you sell gold coins?", "en", None, "policy_faq", None, [], "say_not_sure_and_offer_human", False, False, "not in any doc"),
  ("What is the capital of France?", "en", None, "out_of_scope", None, [], "politely_decline", False, False, ""),
  ("Write me a poem about my order", "en", None, "out_of_scope", None, [], "politely_decline", False, False, ""),

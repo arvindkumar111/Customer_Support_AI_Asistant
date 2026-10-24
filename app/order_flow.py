@@ -13,6 +13,7 @@ import sys
 from dataclasses import dataclass
 
 from app import llm
+from app.guardrails import has_foreign_script
 from app.rag import unsupported_numbers
 from app.tools.orders import extract_order_ids, get_order_status, list_recent_orders
 
@@ -78,9 +79,12 @@ def build_facts(conn, customer_id: str, message: str) -> dict:
 
 
 def valid_reply(reply: str, facts: dict) -> bool:
-    if not reply or len(reply) > 700:
+    if not reply or len(reply) > 700 or has_foreign_script(reply):
         return False
     if unsupported_numbers(reply, json.dumps(facts, ensure_ascii=False), ""):
+        return False
+    # "which order?": every listed order must be in the reply (a cut-off reply listed only part of the sentence)
+    if any(str(o["order_id"]) not in reply for o in facts.get("recent_orders", [])):
         return False
     for o in facts.get("orders", []):
         for key in ("expected_delivery", "delivered_on"):
@@ -125,7 +129,7 @@ def answer_order_question(conn, customer_id: str, message: str, generate=llm.gen
     prompt = (f"<facts>\n{json.dumps(facts, ensure_ascii=False, indent=1)}\n</facts>\n\n"
               f"<customer_message>\n{message}\n</customer_message>")
     try:
-        res = generate(prompt, system=SYSTEM_PROMPT, temperature=0.0, max_tokens=400)
+        res = generate(prompt, system=SYSTEM_PROMPT, temperature=0.0, max_tokens=800)
     except llm.LLMUnavailable:
         return OrderAnswer(template_reply(facts), status, "fallback:llm_unavailable", facts)
 

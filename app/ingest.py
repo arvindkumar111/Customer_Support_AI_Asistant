@@ -7,6 +7,7 @@ Unchanged files are skipped (saves embedding cost).
 """
 import hashlib
 import json
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -36,18 +37,53 @@ def load_product_lines(folder: Path) -> dict:
     return json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
 
 
-def ingest_file(conn, dense_model, path: Path, product_line: str = "general") -> int:
-    """Returns number of chunks written, -1 if unchanged, -2 if only the product line was updated."""
+def load_params(folder: Path) -> dict:
+    """data/policies/policy_params.json: file name -> {param: number}. Numbers that code needs AND the document states."""
+    f = folder / "policy_params.json"
+    return json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+
+
+def validate_params(name: str, text: str, params: dict) -> None:
+    """A parameter must be stated in the document itself (e.g. return_window_days = 7 needs '7 days' in the text).
+    If someone edits the policy but not policy_params.json (or the reverse), ingest fails loudly instead of drifting."""
+    for key, value in params.items():
+        unit = "days" if key.endswith("_days") else "hours" if key.endswith("_hours") else None
+        if unit and not re.search(rf"\b{int(value)}\s+{unit}\b", text):
+            raise ValueError(f"{name}: policy_params.json says {key} = {value}, but the document never says "
+                             f"'{value} {unit}'. Update the document and policy_params.json together.")
+
+
+def sync_params(conn, doc_name: str, params: dict) -> bool:
+    """Make kb.doc_params match `params` for this document. Returns True if anything changed."""
+    desired = {k: int(v) for k, v in params.items()}
+    current = dict(conn.execute("SELECT param, value FROM kb.doc_params WHERE doc_name = %s", (doc_name,)).fetchall())
+    if current == desired:
+        return False
+    with conn.transaction():
+        conn.execute("DELETE FROM kb.doc_params WHERE doc_name = %s", (doc_name,))
+        for k, v in desired.items():
+            conn.execute("INSERT INTO kb.doc_params (doc_name, param, value) VALUES (%s, %s, %s)", (doc_name, k, v))
+    return True
+
+
+def ingest_file(conn, dense_model, path: Path, product_line: str = "general", params: dict | None = None) -> int:
+    """Returns number of chunks written, -1 if unchanged, -2 if only metadata (product line / parameters) was updated.
+    Raises ValueError if policy_params.json disagrees with the document text."""
+    params = params or {}
     text = load_text(path)
+    validate_params(path.name, text, params)
     content_hash = hashlib.sha256(text.encode()).hexdigest()[:16]
 
     row = conn.execute("SELECT content_hash, product_line FROM kb.chunks WHERE doc_name = %s LIMIT 1",
                        (path.name,)).fetchone()
     if row and row[0] == content_hash:
-        if row[1] == product_line:
-            return -1
-        conn.execute("UPDATE kb.chunks SET product_line = %s WHERE doc_name = %s", (product_line, path.name))
-        return -2      # text unchanged: no need to pay for embeddings again
+        changed = False
+        if row[1] != product_line:
+            conn.execute("UPDATE kb.chunks SET product_line = %s WHERE doc_name = %s", (product_line, path.name))
+            changed = True
+        if sync_params(conn, path.name, params):
+            changed = True
+        return -2 if changed else -1      # text unchanged: no need to pay for embeddings again
 
     chunks = chunk_text(text, config.CHUNK_WORDS, config.OVERLAP_WORDS)
     if not chunks:
@@ -71,6 +107,7 @@ def ingest_file(conn, dense_model, path: Path, product_line: str = "general") ->
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 rows,
             )
+        sync_params(conn, path.name, params)          # same transaction: text and numbers always change together
     return len(rows)
 
 
@@ -78,12 +115,22 @@ def main(folder: str) -> None:
     conn = get_conn()
     dense_model = TextEmbedding(config.DENSE_MODEL)
     lines = load_product_lines(Path(folder))
+    all_params = load_params(Path(folder))
+    failed = False
     for path in sorted(Path(folder).glob("*")):
         if path.suffix.lower() in {".md", ".txt", ".pdf"}:
-            pl = lines.get(path.name, "general")
-            n = ingest_file(conn, dense_model, path, pl)
-            msg = {-1: "unchanged, skipped", -2: f"text unchanged, product line set to {pl}"}.get(n, f"{n} chunks indexed ({pl})")
+            pl, params = lines.get(path.name, "general"), all_params.get(path.name, {})
+            try:
+                n = ingest_file(conn, dense_model, path, pl, params)
+            except ValueError as e:
+                print(f"{path.name}: ERROR {e}")
+                failed = True
+                continue
+            msg = {-1: "unchanged, skipped", -2: f"text unchanged, metadata updated (product line {pl}, params {params})"}.get(
+                n, f"{n} chunks indexed ({pl})")
             print(f"{path.name}: {msg}")
+    if failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

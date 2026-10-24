@@ -6,6 +6,8 @@ Failure handling (Stage 6 design):
   400 / 401 / 403      -> our bug or a bad key: fail loudly, never retry
   every model failed   -> raise LLMUnavailable so the caller can hand off to a human
   deadline exceeded    -> same: a slow answer is treated like no answer (customer is never kept waiting 60 s)
+  too little time left -> stop instead of sending a request with a tiny deadline: the API answers those with
+                          HTTP 400 "Manually set deadline ...", which used to crash the whole message (found by the e2e eval)
 
 Test:  python -m app.llm "Reply with the single word: ready"
 """
@@ -66,8 +68,9 @@ def generate(prompt: str, system: str | None = None, temperature: float = 0.0,
     for model in config.GEMINI_MODELS:
         for attempt in range(config.LLM_RETRIES_PER_MODEL + 1):
             remaining = config.LLM_TOTAL_DEADLINE_SECONDS - (time.perf_counter() - start)
-            if remaining <= 1:
-                raise LLMUnavailable(f"deadline of {config.LLM_TOTAL_DEADLINE_SECONDS}s exceeded after {attempts} attempts")
+            if remaining < config.LLM_MIN_CALL_TIMEOUT_SECONDS:
+                raise LLMUnavailable(f"deadline: only {remaining:.1f}s of the {config.LLM_TOTAL_DEADLINE_SECONDS}s budget left "
+                                     f"after {attempts} attempts (a request needs at least {config.LLM_MIN_CALL_TIMEOUT_SECONDS}s)")
             attempts += 1
             t0 = time.perf_counter()
             try:
@@ -76,6 +79,10 @@ def generate(prompt: str, system: str | None = None, temperature: float = 0.0,
                 text = (resp.text or "").strip()
                 if not text:                      # blocked or empty answer: treat as a failure of this model
                     raise errors.ServerError(503, {"error": {"message": "empty response"}}, None)
+                cands = getattr(resp, "candidates", None)
+                if cands and "MAX_TOKENS" in str(getattr(cands[0], "finish_reason", "")):
+                    # cut off mid-sentence (e.g. the model spent the budget "thinking"): never show half an answer
+                    raise errors.ServerError(503, {"error": {"message": "truncated (MAX_TOKENS)"}}, None)
                 return LLMResult(text, model, (time.perf_counter() - t0) * 1000, attempts)
             except errors.APIError as e:
                 code = getattr(e, "code", None)
@@ -88,7 +95,12 @@ def generate(prompt: str, system: str | None = None, temperature: float = 0.0,
                         sleep(config.LLM_BACKOFF_SECONDS * (2 ** attempt))
                         continue
                     break                         # retries used up: next model
-                raise                             # 400/401/403: do not hide real bugs
+                if code == 400 and "deadline" in str(e).lower():
+                    # The API refused the request because of the deadline we set. Not a bug in the request itself:
+                    # treat it like running out of time (graceful handoff) instead of crashing.
+                    log.warning("model %s rejected the request deadline (400): giving up on the LLM for this message", model)
+                    raise LLMUnavailable(f"deadline rejected by the API after {attempts} attempts") from e
+                raise                             # other 400/401/403: do not hide real bugs
             except Exception as e:                # timeouts / network errors
                 log.warning("model %s attempt %d network error: %s", model, attempt + 1, type(e).__name__)
                 if attempt < config.LLM_RETRIES_PER_MODEL:

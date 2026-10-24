@@ -14,7 +14,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 
-from app import config, llm, rag, refund_flow
+from app import config, llm, rag, refund_flow, return_flow
 from app import order_flow
 from app.guardrails import check_input, check_output
 from app.logging_setup import hash_customer, log_interaction
@@ -80,7 +80,7 @@ def _answer(conn, customer_id: str | None, message: str, *, retriever=None,
                      f"customer={customer_id} | route=router_crashed | customer_message={message[:300]!r}", stage_ms)
 
     details.update(intents=rt.intents, sentiment=rt.sentiment, product_line=rt.product_line,
-                   confidence=rt.confidence, angry=rt.angry)
+                   confidence=rt.confidence, angry=rt.angry, models={"router": rt.model})
 
     if rt.actions == ["human"]:
         return Reply(HUMAN_REPLY, ["human"], rt.reason, True, _summary(customer_id, message, rt), stage_ms, details)
@@ -90,8 +90,9 @@ def _answer(conn, customer_id: str | None, message: str, *, retriever=None,
         return Reply(rt.clarifying_question, ["clarify"], rt.reason, False, None, stage_ms, details)
 
     texts, question, handoff, summaries = [], None, False, []
+    policy_added = False
     policy_cache: dict = {}
-    if retriever is None and "policy" in rt.actions + (["policy"] if "refund" in rt.actions else []):
+    if retriever is None and any(a in rt.actions for a in ("policy", "refund", "return")):
         from app.retrieval import Retriever
         retriever = Retriever()
     order_ids = extract_order_ids(message)
@@ -112,23 +113,31 @@ def _answer(conn, customer_id: str | None, message: str, *, retriever=None,
 
     def policy_answer():
         if "a" not in policy_cache:      # never run the policy flow twice for one message
+            # Mixed message ("where is my order and what is the return policy?"): search and answer with the
+            # rules part only. Searching with the whole message found shipping chunks and no returns chunk.
             policy_cache["a"] = timed("policy", lambda: rag.answer_question(
-                message, retriever=retriever, generate=generate, product_line=product_line))
+                rt.policy_question or message, retriever=retriever, generate=generate, product_line=product_line))
+            details["policy_query"] = rt.policy_question
         return policy_cache["a"]
 
     for action in rt.actions:
         try:
-            if action in ("order_status", "refund") and not customer_id:
-                login_needed = True
-                if action == "refund":
+            if action in ("order_status", "refund", "return") and not customer_id:
+                if action == "order_status" or have_order or "policy" not in rt.actions:
+                    login_needed = True      # a general rules question ("can I return X?") needs no login note
+                if action in ("refund", "return"):
                     # (A) not logged in: the general rule (e.g. automatic reversal) needs no account, so give it.
                     pa = policy_answer()
-                    if not pa.handoff:
+                    if not pa.handoff and not policy_added:
                         texts.append(pa.reply)
+                        policy_added = True
             elif action == "policy":
                 a = policy_answer()
-                texts.append(a.reply)
+                if not policy_added:                 # the same answer must never appear twice in one reply
+                    texts.append(a.reply)
+                    policy_added = True
                 details["policy"] = {"status": a.status, "reason": a.reason, "sources": a.sources}
+                details["models"]["policy"] = a.model
                 if a.handoff:
                     handoff = True
                     summaries.append(_summary(customer_id, message, rt, f"policy_unanswered:{a.reason}"))
@@ -139,26 +148,36 @@ def _answer(conn, customer_id: str | None, message: str, *, retriever=None,
                 else:
                     texts.append(a.reply)
                 details["order_status"] = {"status": a.status, "reason": a.reason}
+                details["models"]["order_status"] = a.model
+            elif action in ("refund", "return") and not have_order:
+                # No order number: answer the policy question AND ask which order (see eval note on G007).
+                pa = policy_answer()
+                if not pa.handoff and not policy_added:
+                    texts.append(pa.reply)
+                    policy_added = True
+                facts = refund_flow.recent_orders_facts(conn, customer_id)
+                question = question or refund_flow.template_reply(facts)   # fixed text: no LLM call needed
+                details[action] = {"decision": "need_order_number", "policy_status": pa.status}
+                if not facts["recent_orders"]:
+                    handoff = True
+                    summaries.append(_summary(customer_id, message, rt, f"{action}_asked_but_no_orders"))
+            elif action == "return":
+                a = timed("return", lambda: return_flow.answer_return_request(conn, customer_id, message, generate=generate, today=today))
+                texts.append(a.reply)
+                details["return"] = {"decision": a.decision, "reason": a.reason}
+                details["models"]["return"] = a.model
+                if a.handoff:
+                    handoff = True
+                    summaries.append(a.handoff_summary or _summary(customer_id, message, rt))
             elif action == "refund":
-                if not have_order:
-                    # No order number: answer the policy question AND ask which order (see eval note on G007).
-                    pa = policy_answer()
-                    if not pa.handoff:
-                        texts.append(pa.reply)
-                    facts = refund_flow.recent_orders_facts(conn, customer_id)
-                    question = question or refund_flow.template_reply(facts)   # fixed text: no LLM call needed
-                    details["refund"] = {"decision": "need_order_number", "policy_status": pa.status}
-                    if not facts["recent_orders"]:
-                        handoff = True
-                        summaries.append(_summary(customer_id, message, rt, "refund_asked_but_no_orders"))
-                else:
-                    a = timed("refund", lambda: refund_flow.answer_refund_request(
-                        conn, customer_id, message, angry=rt.angry, generate=generate, today=today))
-                    texts.append(a.reply)
-                    details["refund"] = {"decision": a.decision, "reason": a.reason}
-                    if a.handoff:
-                        handoff = True
-                        summaries.append(a.handoff_summary or _summary(customer_id, message, rt))
+                a = timed("refund", lambda: refund_flow.answer_refund_request(
+                    conn, customer_id, message, angry=rt.angry, generate=generate, today=today))
+                texts.append(a.reply)
+                details["refund"] = {"decision": a.decision, "reason": a.reason}
+                details["models"]["refund"] = a.model
+                if a.handoff:
+                    handoff = True
+                    summaries.append(a.handoff_summary or _summary(customer_id, message, rt))
         except Exception:
             log.exception("flow %s crashed", action)
             texts.append(HUMAN_REPLY)

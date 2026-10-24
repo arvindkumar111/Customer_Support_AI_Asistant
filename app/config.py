@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://support:support_dev_password@localhost:5432/support")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://support:support_dev_password@localhost:5433/support")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 # Multilingual model: English, Hindi and Hinglish queries land near English policy text.
@@ -28,6 +28,7 @@ USE_RERANKER = False   # eval on 13 golden queries: rerank hurt Recall@3 (1.00 -
 GEMINI_MODELS = ["gemini-3.5-flash-lite", "gemini-3.5-flash"]
 LLM_TIMEOUT_SECONDS = 15          # max wait for ONE call
 LLM_TOTAL_DEADLINE_SECONDS = 20   # max wait for the WHOLE chain (all retries + fallbacks), then hand off
+LLM_MIN_CALL_TIMEOUT_SECONDS = 10  # never send a request with less time than this: the API rejects very short deadlines (HTTP 400, seen in evals/eval_e2e)
 LLM_RETRIES_PER_MODEL = 1     # 1 retry (2 attempts) per model, then fall back to the next model
 LLM_BACKOFF_SECONDS = 1.0     # waits 1s, 2s, 4s ... between retries
 
@@ -39,3 +40,10 @@ ROUTER_LOW = 0.4    # below this: hand off to a human; in between: ask one clari
 RATE_LIMIT_PER_MINUTE = 20          # messages per customer per minute
 LOG_HASH_SECRET = os.getenv("LOG_HASH_SECRET", "dev-secret-change-me")   # MUST be set to a long random value in production
 LOG_MESSAGE_TEXT = os.getenv("LOG_MESSAGE_TEXT", "true").lower() == "true"  # redacted text, 200 chars max; set false if policy forbids
+
+# HTTP API (Step 8)
+SESSION_SECRET = os.getenv("SESSION_SECRET", "dev-session-secret-change-me")   # MUST be a long random value in production
+SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_HOURS", "8")) * 3600
+DEMO_LOGIN = os.getenv("DEMO_LOGIN", "true").lower() == "true"       # pick-a-test-customer login; set false in production
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"  # true when served over HTTPS
+MAX_BODY_BYTES = 8192

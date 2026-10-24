@@ -1,1 +1,0 @@
-"""Support tools with explicit authorization boundaries."""

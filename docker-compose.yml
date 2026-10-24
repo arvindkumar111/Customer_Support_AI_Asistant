@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: support_dev_password   # dev only; use a secrets manager in production
       POSTGRES_DB: support
     ports:
-      - "5433:5432"
+      - "5433:5432"   # host port 5433: a Postgres already installed on Windows often owns 5432
     volumes:
       - pg_data:/var/lib/postgresql/data
       - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql

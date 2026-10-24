@@ -7,7 +7,9 @@ from datetime import date
 from app import llm
 from app.db import get_conn
 from app.handle import DECLINE_REPLY, HUMAN_REPLY, LOGIN_REPLY, handle_message
+from app import return_flow
 from app.retrieval import RetrievedChunk
+from app.tools.returns import check_return_eligibility
 
 TODAY = date(2026, 10, 13)
 conn = get_conn()
@@ -30,9 +32,11 @@ def cleanup():
 
 class FakeRetriever:
     calls = []
+    queries = []
 
     def retrieve(self, q, categories=None, **k):
         FakeRetriever.calls.append(k.get("product_line"))
+        FakeRetriever.queries.append(q)
         return [RetrievedChunk("i", "returns_electronics.md", "Standard returns", "returns",
                                "Standard returns\nElectronics can be returned within 7 days of delivery.", 0.03)]
 
@@ -48,6 +52,8 @@ def scripted(route_json, rag_text="Aap 7 days mein return kar sakte hain.", orde
             if refund_text is None:
                 raise llm.LLMUnavailable("use template")
             text = refund_text
+        elif "product returns" in system:
+            raise llm.LLMUnavailable("use template")
         elif "order status" in system:
             if order_text is None:
                 raise llm.LLMUnavailable("use template")
@@ -60,9 +66,17 @@ def scripted(route_json, rag_text="Aap 7 days mein return kar sakte hain.", orde
     return g
 
 
-def R(intents, conf=0.9, sent="calm", prod="unknown", q=""):
-    return {"intents": intents, "sentiment": sent, "product_line": prod, "confidence": conf, "clarifying_question": q}
+def R(intents, conf=0.9, sent="calm", prod="unknown", q="", pq=None):
+    d = {"intents": intents, "sentiment": sent, "product_line": prod, "confidence": conf, "clarifying_question": q}
+    if pq is not None:
+        d["policy_question"] = pq
+    return d
 
+
+# The return flow reads the window from kb.doc_params. Tests inject fixed numbers instead of touching real policy rows.
+_real_check = check_return_eligibility
+return_flow.check_return_eligibility = lambda c, cust, oid, **kw: _real_check(
+    c, cust, oid, window_lookup=lambda cc, pl: {"electronics": 7, "fashion": 15}.get(pl), **kw)
 
 cleanup()
 H = lambda cust, msg, gen, **kw: handle_message(conn, cust, msg, retriever=FakeRetriever(), generate=gen, today=TODAY, **kw)
@@ -125,6 +139,38 @@ check("(B) a product line the router DID find is not overridden", FakeRetriever.
 g_c = scripted(R(["policy_faq"], 0.9))
 H("C002", "Mera order #45821 kab aayega aur return policy kya hai?", g_c)
 check("(B) with no known product, the prompt carries no <known_product> tag", all("<known_product>" not in p for p in g_c.prompts))
+FakeRetriever.queries.clear()
+g_m = scripted(R(["order_status", "policy_faq"], 0.9, pq="return policy kya hai?"))
+r = H("C001", "Mera order #45821 kab aayega aur return policy kya hai?", g_m)
+check("(C) mixed message: retrieval searches with the rules part only", FakeRetriever.queries == ["return policy kya hai?"])
+rag_prompt = [p for sysm, p in zip(g_m.log, g_m.prompts) if "customer support assistant" in sysm][0]
+check("(C) the policy LLM sees only the rules part, not the order part", "return policy kya hai?" in rag_prompt and "#45821" not in rag_prompt)
+check("(C) the order part is still answered", "14 Oct 2026" in r.text and "7 days" in r.text)
+FakeRetriever.queries.clear()
+H("C001", "Mera order #45821 kab aayega aur return policy kya hai?", scripted(R(["order_status", "policy_faq"], 0.9)))
+check("(C) no rewrite from the router -> the whole message is used", FakeRetriever.queries == ["Mera order #45821 kab aayega aur return policy kya hai?"])
+r = H("C005", "Order 45833 return karna hai", scripted(R(["return_request"], 0.95)))
+check("(D) return with an order -> eligibility decided by code: window passed, human offered",
+      r.actions == ["return"] and r.handoff and "15-day" in r.text and "8 Oct 2026" in r.text)
+r = H("C001", "Order 45822 return karna hai", scripted(R(["return_request"], 0.95)))
+check("(D) eligible return -> real last date, still a handoff", "18 Oct 2026" in r.text and r.handoff)
+r = H("C001", "Mujhe return karna hai", scripted(R(["return_request"], 0.95)))
+check("(D) return without an order number -> policy answer AND which-order question", "7 days" in r.text and "Which order" in r.text)
+r = H(None, "Mujhe return karna hai", scripted(R(["return_request"], 0.95)))
+check("(D) not logged in + return -> policy answer AND a login request, no order data",
+      "7 days" in r.text and r.text.endswith(LOGIN_REPLY) and "Wireless" not in r.text)
+r = H("C002", "Order #45822 return karna hai", scripted(R(["return_request"], 0.95)))
+check("(D) someone else's order -> not found, nothing leaked", "could not find" in r.text.lower() and "Laptop" not in r.text)
+r = H("C001", "Mera order #45821 kahan hai?", scripted(R(["order_status"])))
+check("(F) the reply records which model answered each stage", set(r.details["models"]) >= {"router", "order_status"} and r.details["models"]["router"] == "fake")
+r = H("C001", "Can I return innerwear?", scripted(R(["return_request", "policy_faq"], 0.9)))
+check("(E) policy + return intents: the policy answer appears ONCE", r.text.count("7 days") == 1)
+r = H(None, "Can I return innerwear?", scripted(R(["return_request", "policy_faq"], 0.9)))
+check("(E) not logged in + a general rules question: one answer, no login note", r.text.count("7 days") == 1 and LOGIN_REPLY not in r.text)
+r = H(None, "Order #45833 return karna hai", scripted(R(["return_request"], 0.95)))
+check("(E) not logged in + a specific order: policy answer AND the login request", "7 days" in r.text and r.text.endswith(LOGIN_REPLY))
+r = H(None, "Paisa kat gaya par order fail ho gaya, kya karu?", scripted(R(["refund_request", "policy_faq"], 0.9)))
+check("(E) not logged in + refund AND policy intents: answered once, no login note", r.text.count("7 days") == 1 and LOGIN_REPLY not in r.text)
 g = scripted(R(["refund_request"], 0.95, "frustrated"))
 r = H(None, "Paisa kat gaya par order fail ho gaya, kya karu?", g)
 check("(A) not logged in + refund question -> policy answer AND a login request", "7 days" in r.text and r.text.endswith(LOGIN_REPLY))

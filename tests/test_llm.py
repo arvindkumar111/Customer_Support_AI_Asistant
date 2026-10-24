@@ -80,15 +80,15 @@ c = FakeClient({FIRST: ""})
 r = llm.generate("hi", client=c, sleep=nosleep)
 check("empty answer counts as a failure and falls back", r.model == SECOND)
 
-old = config.LLM_TOTAL_DEADLINE_SECONDS
-config.LLM_TOTAL_DEADLINE_SECONDS = 2
+old, old_floor = config.LLM_TOTAL_DEADLINE_SECONDS, config.LLM_MIN_CALL_TIMEOUT_SECONDS
+config.LLM_TOTAL_DEADLINE_SECONDS, config.LLM_MIN_CALL_TIMEOUT_SECONDS = 2, 0.3
 c = FakeClient({m: err(503) for m in config.GEMINI_MODELS}, delay=1.2)
 try:
     llm.generate("hi", client=c, sleep=nosleep)
     ok = False
 except llm.LLMUnavailable as e:
     ok = "deadline" in str(e)
-config.LLM_TOTAL_DEADLINE_SECONDS = old
+config.LLM_TOTAL_DEADLINE_SECONDS, config.LLM_MIN_CALL_TIMEOUT_SECONDS = old, old_floor
 check("total deadline stops a slow chain early", ok and len(c.calls) < 2 * len(config.GEMINI_MODELS))
 
 c = FakeClient()
@@ -97,4 +97,70 @@ check("json_mode asks the API for JSON", c.configs[0].response_mime_type == "app
 c = FakeClient()
 llm.generate("hi", client=c, sleep=nosleep)
 check("default mode does not force JSON", c.configs[0].response_mime_type is None)
+# ---- the crash found by the e2e eval: tiny per-call deadlines ----
+def timeouts_of(c):
+    return [x.http_options.timeout for x in c.configs]
+
+
+old, old_floor, old_call = config.LLM_TOTAL_DEADLINE_SECONDS, config.LLM_MIN_CALL_TIMEOUT_SECONDS, config.LLM_TIMEOUT_SECONDS
+config.LLM_TOTAL_DEADLINE_SECONDS, config.LLM_MIN_CALL_TIMEOUT_SECONDS, config.LLM_TIMEOUT_SECONDS = 20, 10, 15
+c = FakeClient()
+llm.generate("hi", client=c, sleep=nosleep)
+check("first call gets the normal timeout (15 s)", timeouts_of(c) == [15000])
+config.LLM_TOTAL_DEADLINE_SECONDS = 9
+c = FakeClient()
+try:
+    llm.generate("hi", client=c, sleep=nosleep)
+    ok = False
+except llm.LLMUnavailable as e:
+    ok = "deadline" in str(e)
+check("less than the minimum time left -> no request is sent at all", ok and c.calls == [])
+config.LLM_TOTAL_DEADLINE_SECONDS, config.LLM_MIN_CALL_TIMEOUT_SECONDS = 12, 0.4
+c = FakeClient({m: err(503) for m in config.GEMINI_MODELS}, delay=0.0)
+try:
+    llm.generate("hi", client=c, sleep=nosleep)
+except llm.LLMUnavailable:
+    pass
+check("a request never carries a deadline below the minimum", all(t >= 0.4 * 1000 for t in timeouts_of(c)))
+config.LLM_TOTAL_DEADLINE_SECONDS, config.LLM_MIN_CALL_TIMEOUT_SECONDS, config.LLM_TIMEOUT_SECONDS = old, old_floor, old_call
+
+deadline_400 = errors.ClientError(400, {"error": {"code": 400, "message": "Manually set deadline 3000ms is too short", "status": "INVALID_ARGUMENT"}}, None)
+c = FakeClient({FIRST: deadline_400})
+try:
+    llm.generate("hi", client=c, sleep=nosleep)
+    ok = False
+except llm.LLMUnavailable as e:
+    ok = "deadline" in str(e)
+check("HTTP 400 'Manually set deadline' -> graceful LLMUnavailable, not a crash", ok and len(c.calls) == 1)
+other_400 = errors.ClientError(400, {"error": {"code": 400, "message": "API key not valid", "status": "INVALID_ARGUMENT"}}, None)
+c = FakeClient({FIRST: other_400})
+try:
+    llm.generate("hi", client=c, sleep=nosleep)
+    ok = False
+except errors.ClientError:
+    ok = True
+check("any OTHER 400 (e.g. bad key) is still raised loudly", ok)
+# ---- truncation ----
+class Cand:
+    def __init__(self, reason):
+        self.finish_reason = reason
+
+
+class TruncResp:
+    def __init__(self, text, reason):
+        self.text, self.candidates = text, [Cand(reason)]
+
+
+class TruncClient(FakeClient):
+    def generate_content(self, model, contents, config):
+        self.calls.append(model)
+        self.configs.append(config)
+        return TruncResp("Aap kis order ke baare mein pooch rahe hain? Aapke recent", "FinishReason.MAX_TOKENS") if model == FIRST \
+            else TruncResp("a complete answer", "FinishReason.STOP")
+
+
+c = TruncClient()
+r = llm.generate("hi", client=c, sleep=nosleep)
+check("a reply cut off by MAX_TOKENS is treated as a failure and the next model answers", r.model == SECOND and r.text == "a complete answer")
+check("a normal STOP finish is accepted", llm.generate("hi", client=FakeClient(), sleep=nosleep).model == FIRST)
 print(f"\nall {passed} checks passed")

@@ -107,6 +107,24 @@ def check_input(message) -> InputCheck:
 
 
 # ---------------------------------------------------------------- output guard
+# Scripts that are never legitimate in OUR replies (we answer in English, Roman-script Hinglish and Devanagari Hindi).
+# Seen in an evaluation: one Arabic word inside an otherwise correct Hinglish reply.
+_FOREIGN_RANGES = [
+    (0x0400, 0x04FF),   # Cyrillic
+    (0x0590, 0x08FF),   # Hebrew, Arabic, Syriac, Thaana and extensions
+    (0x0980, 0x0DFF),   # Bengali ... Sinhala (Indic scripts other than Devanagari)
+    (0x0E00, 0x0E7F),   # Thai
+    (0x3040, 0x30FF),   # Japanese kana
+    (0x3400, 0x4DBF), (0x4E00, 0x9FFF),   # CJK
+    (0xAC00, 0xD7AF),   # Hangul
+    (0xFB1D, 0xFDFF), (0xFE70, 0xFEFF),   # Hebrew / Arabic presentation forms
+]
+
+
+def has_foreign_script(text: str) -> bool:
+    return any(lo <= ord(ch) <= hi for ch in text for lo, hi in _FOREIGN_RANGES)
+
+
 PROMPT_LEAK_MARKERS = [
     "policy_excerpts", "customer_message", "<facts>", "</facts>", "you are a customer support assistant",
     "return only a json", "you classify customer-support", "you write short customer-support",
@@ -135,4 +153,6 @@ def check_output(reply: str, customer_id: str | None = None) -> OutputCheck:
         foreign = {c for c in _CUSTOMER_ID.findall(reply) if c != customer_id}
         if foreign:
             reasons.append("other_customer_id_in_reply")
+        if has_foreign_script(reply):
+            reasons.append("unexpected_script")
     return OutputCheck(not reasons, reasons)

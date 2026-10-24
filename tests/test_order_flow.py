@@ -72,4 +72,16 @@ check("delivered order shows delivered date", "Delivered on 11 Oct 2026" in a.re
 
 a = answer_order_question(conn, "C004", "order 45832 ka kya hua", generate=down)
 check("failed order shows failed status", "failed" in a.reply)
+# ---- "which order?" replies must list the orders; foreign scripts and cut-off replies fall back to the template ----
+a = answer_order_question(conn, "C001", "Mera order kahan hai?", generate=fake("Aap kis order ke baare mein pooch rahe hain? Aapke recent"))
+check("cut-off 'which order?' reply (orders not listed) -> template that lists them", a.reason == "fallback:invalid_llm_reply" and "45821" in a.reply and "45822" in a.reply)
+ids = [o["order_id"] for o in answer_order_question(conn, "C001", "Mera order kahan hai?", generate=down).facts["recent_orders"]]
+full = "Aap kis order ke baare mein pooch rahe hain? " + ", ".join(f"{i}" for i in ids) + "?"
+a = answer_order_question(conn, "C001", "Mera order kahan hai?", generate=fake(full))
+check("a reply that lists every order is accepted as written", a.reason == "ok" and a.reply == full and len(ids) >= 2)
+partial = "Aap kis order ke baare mein pooch rahe hain? " + str(ids[0]) + "?"
+a = answer_order_question(conn, "C001", "Mera order kahan hai?", generate=fake(partial))
+check("a reply that lists only some of the orders -> template with all of them", a.reason == "fallback:invalid_llm_reply" and all(str(i) in a.reply for i in ids))
+a = answer_order_question(conn, "C001", "Mera order #45821 kahan hai?", generate=fake("Aapka order #45821 out for delivery hai \u0628\u0634\u0631\u0637 14 Oct 2026."))
+check("foreign script in an order reply -> template", a.reason == "fallback:invalid_llm_reply" and "14 Oct 2026" in a.reply)
 print(f"\nall {passed} checks passed")

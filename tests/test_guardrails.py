@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 
-from app.guardrails import MAX_MESSAGE_CHARS, check_input, check_output, redact
+from app.guardrails import MAX_MESSAGE_CHARS, check_input, check_output, has_foreign_script, redact
 
 passed = 0
 
@@ -89,4 +89,14 @@ check("other customer's id in reply is blocked", "other_customer_id_in_reply" in
 check("empty reply is blocked", not check_output("   ", "C001").ok)
 check("huge reply is blocked", not check_output("x" * 2500, "C001").ok)
 check("not-logged-in reply may not name any customer id", not check_output("Hello C001", None).ok)
+# ---- foreign scripts in replies ----
+check("Arabic word inside a Hinglish reply is detected", has_foreign_script("Aap 7 din mein return kar sakte hain, \u0628\u0634\u0631\u0637 unused ho"))
+check("Cyrillic is detected", has_foreign_script("Return \u043f\u043e\u043b\u0438\u0442\u0438\u043a\u0430"))
+check("Chinese is detected", has_foreign_script("\u9000\u8d27 within 7 days"))
+check("Tamil is detected (we do not answer in other Indian scripts)", has_foreign_script("\u0bb5\u0ba3\u0b95\u0bcd\u0b95\u0bae\u0bcd"))
+check("plain English, Hinglish, rupee sign and digits are fine", not has_foreign_script("Aapka refund of \u20b91,999 (Rs 1999) 20 Oct 2026 tak aa jayega!"))
+check("Devanagari Hindi is fine", not has_foreign_script("\u0938\u094d\u092e\u093e\u0930\u094d\u091f\u092b\u094b\u0928 \u0915\u0940 \u0935\u093e\u0930\u0902\u091f\u0940 1 \u0938\u093e\u0932 \u0939\u0948"))
+check("Devanagari with a zero-width joiner is fine", not has_foreign_script("\u0915\u094d\u200d\u092f\u093e"))
+check("emoji and curly quotes are fine", not has_foreign_script("Thanks \U0001F642 \u2018ok\u2019 \u2013 done"))
+check("output guard blocks a reply with a foreign script", "unexpected_script" in check_output("Return within 7 days \u0628\u0634\u0631\u0637", "C001").reasons)
 print(f"\nall {passed} checks passed")

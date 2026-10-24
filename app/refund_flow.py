@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 from app import llm
 from app.order_flow import MAX_IDS, STATUS_TEXT, fmt_date  # noqa: F401  (MAX_IDS kept for symmetry)
+from app.guardrails import has_foreign_script
 from app.rag import unsupported_numbers
 from app.tools.orders import extract_order_ids, list_recent_orders
 from app.tools.refunds import RefundDecision, request_refund
@@ -80,11 +81,12 @@ def required_strings(facts: dict) -> list[str]:
         req.append(f"Rs {facts['amount']}")
     if "expected_by" in facts:
         req.append(facts["expected_by"])
+    req += [str(o["order_id"]) for o in facts.get("recent_orders", [])]     # "which order?" must list the orders
     return req
 
 
 def valid_reply(reply: str, facts: dict) -> bool:
-    if not reply or len(reply) > 700:
+    if not reply or len(reply) > 700 or has_foreign_script(reply):
         return False
     if unsupported_numbers(reply, json.dumps(facts, ensure_ascii=False), ""):
         return False
@@ -151,7 +153,7 @@ def answer_refund_request(conn, customer_id: str, message: str, *, angry: bool =
     prompt = (f"<facts>\n{json.dumps(facts, ensure_ascii=False, indent=1)}\n</facts>\n\n"
               f"<customer_message>\n{message}\n</customer_message>")
     try:
-        res = generate(prompt, system=SYSTEM_PROMPT, temperature=0.0, max_tokens=400)
+        res = generate(prompt, system=SYSTEM_PROMPT, temperature=0.0, max_tokens=800)
     except llm.LLMUnavailable:
         return RefundAnswer(template_reply(facts), decision, "fallback:llm_unavailable", facts, handoff, summary)
     reply = res.text.strip()
